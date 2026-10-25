@@ -847,16 +847,3 @@ terraform destroy
 
 ---
 
-## 9. Submission
-
-1. Push this repository to GitHub:
-   ```bash
-   git init
-   git add .
-   git commit -m "Terraform and Ansible deployment of TravelMemory MERN app"
-   git branch -M main
-   git remote add origin https://github.com/<your-username>/<repo-name>.git
-   git push -u origin main
-   ```
-2. Put the repository link in a `.txt`, `.docx` or `.pdf` file.
-3. Upload that file on Vlearn.
