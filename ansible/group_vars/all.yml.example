@@ -1,0 +1,14 @@
+# Copy to all.yml, change the passwords, and ideally encrypt with:
+#   ansible-vault encrypt group_vars/all.yml
+db_private_ip: "<DB_PRIVATE_IP>"
+web_public_ip: "<WEB_PUBLIC_IP>"
+
+mongo_admin_user: admin
+mongo_admin_password: "ChangeMeAdmin#123"
+mongo_app_user: travelapp
+mongo_app_password: "ChangeMeApp#123"
+mongo_db_name: travelmemory
+
+app_repo: https://github.com/UnpredictablePrashant/TravelMemory.git
+app_dir: /opt/TravelMemory
+backend_port: 3001

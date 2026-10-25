@@ -1,0 +1,9 @@
+; Copy to inventory.ini and replace the placeholders with the Terraform outputs.
+[web]
+webserver ansible_host=<WEB_PUBLIC_IP>
+
+[db]
+dbserver ansible_host=<DB_PRIVATE_IP>
+
+[db:vars]
+ansible_ssh_common_args='-o ProxyCommand="ssh -W %h:%p -q -i ~/.ssh/travel_key -o StrictHostKeyChecking=no ubuntu@<WEB_PUBLIC_IP>"'

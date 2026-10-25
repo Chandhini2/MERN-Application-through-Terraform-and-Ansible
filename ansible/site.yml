@@ -1,0 +1,272 @@
+---
+# ===================================================== Database server
+- name: Configure MongoDB on the database server
+  hosts: db
+  tasks:
+    - name: Install prerequisites
+      apt:
+        name: [gnupg, curl, ca-certificates]
+        update_cache: yes
+
+    - name: Add MongoDB GPG key
+      shell: |
+        curl -fsSL https://pgp.mongodb.com/server-7.0.asc | gpg --dearmor -o /usr/share/keyrings/mongodb-server-7.0.gpg
+      args:
+        creates: /usr/share/keyrings/mongodb-server-7.0.gpg
+
+    - name: Add MongoDB repository
+      apt_repository:
+        repo: "deb [arch=amd64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse"
+        filename: mongodb-org-7.0
+        state: present
+
+    - name: Install MongoDB
+      apt:
+        name: mongodb-org
+        update_cache: yes
+
+    - name: Bind MongoDB to localhost and the private IP
+      lineinfile:
+        path: /etc/mongod.conf
+        regexp: '^\s*bindIp:'
+        line: "  bindIp: 127.0.0.1,{{ db_private_ip }}"
+      notify: restart mongod
+
+    - name: Start MongoDB (auth not yet enabled, needed to create the first users)
+      service:
+        name: mongod
+        state: started
+        enabled: yes
+
+    - name: Flush handlers
+      meta: flush_handlers
+
+    - name: Wait for MongoDB
+      wait_for:
+        port: 27017
+        host: 127.0.0.1
+        delay: 3
+
+    - name: Create admin and application users (idempotent)
+      shell: |
+        mongosh --quiet --eval '
+          const admin = db.getSiblingDB("admin");
+          if (!admin.getUser("{{ mongo_admin_user }}")) {
+            admin.createUser({user: "{{ mongo_admin_user }}", pwd: "{{ mongo_admin_password }}",
+              roles: [{role: "root", db: "admin"}]});
+          }
+          const app = db.getSiblingDB("{{ mongo_db_name }}");
+          if (!app.getUser("{{ mongo_app_user }}")) {
+            app.createUser({user: "{{ mongo_app_user }}", pwd: "{{ mongo_app_password }}",
+              roles: [{role: "readWrite", db: "{{ mongo_db_name }}"}]});
+          }
+          app.createCollection("trips");
+        ' 2>&1 || true
+      no_log: true
+      register: mongo_users
+      changed_when: false
+      # This only works while auth is still disabled; on re-runs auth is on
+      # and the users already exist, so errors are tolerated.
+
+    - name: Enable MongoDB authentication
+      blockinfile:
+        path: /etc/mongod.conf
+        marker: "# {mark} ANSIBLE SECURITY"
+        block: |
+          security:
+            authorization: enabled
+      notify: restart mongod
+
+  handlers:
+    - name: restart mongod
+      service:
+        name: mongod
+        state: restarted
+
+# ======================================================== Web server
+- name: Configure Node.js, the MERN app and Nginx on the web server
+  hosts: web
+  tasks:
+    - name: Install base packages
+      apt:
+        name: [git, curl, nginx, ca-certificates, gnupg]
+        update_cache: yes
+
+    - name: Add NodeSource repository (Node.js 18)
+      shell: curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
+      args:
+        creates: /etc/apt/sources.list.d/nodesource.list
+
+    - name: Install Node.js and npm
+      apt:
+        name: nodejs
+        update_cache: yes
+
+    - name: Install pm2 globally
+      npm:
+        name: pm2
+        global: yes
+
+    - name: Clone the TravelMemory repository
+      git:
+        repo: "{{ app_repo }}"
+        dest: "{{ app_dir }}"
+        version: main
+        force: yes
+      register: repo
+      failed_when: false
+
+    - name: Fall back to the master branch if main does not exist
+      git:
+        repo: "{{ app_repo }}"
+        dest: "{{ app_dir }}"
+        force: yes
+      when: repo is failed
+
+    - name: Create backend .env
+      template:
+        src: backend.env.j2
+        dest: "{{ app_dir }}/backend/.env"
+        mode: "0600"
+
+    - name: Create frontend .env
+      template:
+        src: frontend.env.j2
+        dest: "{{ app_dir }}/frontend/.env"
+        mode: "0644"
+
+    - name: Install backend dependencies
+      npm:
+        path: "{{ app_dir }}/backend"
+
+    - name: Install frontend dependencies
+      npm:
+        path: "{{ app_dir }}/frontend"
+
+    - name: Build the React frontend
+      command: npm run build
+      args:
+        chdir: "{{ app_dir }}/frontend"
+      environment:
+        NODE_OPTIONS: --max-old-space-size=1536
+
+    - name: Start (or restart) the backend with pm2
+      shell: |
+        pm2 delete travel-backend || true
+        pm2 start index.js --name travel-backend
+        pm2 save
+      args:
+        chdir: "{{ app_dir }}/backend"
+
+    - name: Make pm2 start on boot
+      command: pm2 startup systemd -u root --hp /root
+      changed_when: false
+
+    - name: Configure Nginx
+      template:
+        src: nginx.conf.j2
+        dest: /etc/nginx/sites-available/travelmemory
+      notify: reload nginx
+
+    - name: Enable the Nginx site
+      file:
+        src: /etc/nginx/sites-available/travelmemory
+        dest: /etc/nginx/sites-enabled/travelmemory
+        state: link
+      notify: reload nginx
+
+    - name: Remove default Nginx site
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: reload nginx
+
+    - name: Make sure Nginx is running
+      service:
+        name: nginx
+        state: started
+        enabled: yes
+
+  handlers:
+    - name: reload nginx
+      service:
+        name: nginx
+        state: reloaded
+
+# =================================================== Security hardening
+- name: Harden both servers
+  hosts: all
+  tasks:
+    - name: Install ufw and fail2ban
+      apt:
+        name: [ufw, fail2ban, unattended-upgrades]
+        update_cache: yes
+
+    - name: Disable root login over SSH
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PermitRootLogin'
+        line: "PermitRootLogin no"
+      notify: restart ssh
+
+    - name: Disable password authentication
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PasswordAuthentication'
+        line: "PasswordAuthentication no"
+      notify: restart ssh
+
+    - name: Limit SSH retries
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?MaxAuthTries'
+        line: "MaxAuthTries 3"
+      notify: restart ssh
+
+    - name: ufw default deny incoming
+      ufw:
+        default: deny
+        direction: incoming
+
+    - name: ufw default allow outgoing
+      ufw:
+        default: allow
+        direction: outgoing
+
+    - name: ufw allow SSH
+      ufw:
+        rule: allow
+        port: "22"
+        proto: tcp
+
+    - name: ufw allow HTTP and HTTPS (web only)
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop: ["80", "443"]
+      when: inventory_hostname in groups['web']
+
+    - name: ufw allow MongoDB from the VPC only (db only)
+      ufw:
+        rule: allow
+        port: "27017"
+        proto: tcp
+        from_ip: 10.0.0.0/16
+      when: inventory_hostname in groups['db']
+
+    - name: Enable ufw
+      ufw:
+        state: enabled
+
+    - name: Enable fail2ban
+      service:
+        name: fail2ban
+        state: started
+        enabled: yes
+
+  handlers:
+    - name: restart ssh
+      service:
+        name: ssh
+        state: restarted

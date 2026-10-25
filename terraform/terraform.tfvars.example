@@ -1,0 +1,3 @@
+aws_region      = "ap-south-1"
+my_ip_cidr      = "YOUR.PUBLIC.IP.HERE/32"   # find it with: curl ifconfig.me
+public_key_path = "~/.ssh/travel_key.pub"
